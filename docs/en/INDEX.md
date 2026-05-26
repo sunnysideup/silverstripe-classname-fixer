@@ -3,13 +3,13 @@
 run
 
 ```shell
-vendor/bin/sake sake dev/tasks/check-class-names
+vendor/bin/sake sake dev/tasks/check-class-names --dryrun=1
 ```
 
 To try it out, and run:
 
 ```shell
-vendor/bin/sake sake dev/tasks/check-class-names --for-real=1
+vendor/bin/sake sake dev/tasks/check-class-names --forreal=1
 ```
 
 To apply.
