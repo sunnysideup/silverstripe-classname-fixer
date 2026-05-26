@@ -1,53 +1,43 @@
 {
-  "name": "sunnysideup/classname-fixer",
-  "description": "Checks all your classnames and, if they do not exist (anymore), finds the best new match and updates them.",
-  "type": "silverstripe-vendormodule",
-  "keywords": [
-    "migration",
-    "update",
-    "upgrade",
-    "braking changes",
-    "errors",
-    "classnames",
-    "class name",
-    "dev tool",
-    "database",
-    "clean"
-  ],
-  "license": "BSD-3-Clause",
-  "require": {
-    "silverstripe/framework": "^5.0",
-    "silverstripe/admin": "^2.0"
-  },
-  "require-dev": {
-    "sunnysideup/sswebpack_engine_only": "5.x-dev",
-    "silverleague/ideannotator": "*",
-    "phpunit/phpunit": "^9.6",
-    "squizlabs/php_codesniffer": "^3.7",
-    "silverstripe/standards": "^1",
-    "phpstan/extension-installer": "^1.3"
-  },
-  "autoload": {
-    "psr-4": {
-      "Sunnysideup\\ClassNameFixer\\": "src/"
-    }
-  },
-  "extra": {
-    "expose": [
-      "client/dist"
+    "name": "sunnysideup/classname-fixer",
+    "description": "Checks all your class names and, if they do not exist (anymore), finds the best new match and updates them.",
+    "type": "silverstripe-vendormodule",
+    "keywords": [
+        "migration",
+        "update",
+        "upgrade",
+        "breaking changes",
+        "errors",
+        "classnames",
+        "class name",
+        "dev tool",
+        "database",
+        "clean"
+    ],
+    "license": "BSD-3-Clause",
+    "require": {
+        "silverstripe/framework": "^5.0",
+        "silverstripe/admin": "^2.0"
+    },
+    "require-dev": {},
+    "autoload": {
+        "psr-4": {
+            "Sunnysideup\\ClassNameFixer\\": "src/"
+        }
+    },
+    "extra": {
+        "expose": [
+            "client/dist"
+        ]
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "bin": [],
+    "authors": [
+        {
+            "name": "Nicolaas Thiemen Francken",
+            "email": "modules@sunnysideup.co.nz",
+            "role": "lead developer"
+        }
     ]
-  },
-  "minimum-stability": "dev",
-  "prefer-stable": true,
-  "bin": [
-    "bin/sake-npm-build-classname-fixer.sh",
-    "bin/sake-npm-watch-classname-fixer.sh"
-  ],
-  "authors": [
-    {
-      "name": "Nicolaas Thiemen Francken",
-      "email": "modules@sunnysideup.co.nz",
-      "role": "lead developer"
-    }
-  ]
 }
