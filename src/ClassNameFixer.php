@@ -69,13 +69,13 @@ class ClassNameFixer extends BuildTask
 
     public function run($request)
     {
-        $this->verbose = $request->getVar('verbose') ?: $this->verbose;
+        $this->verbose = $request?->getVar('verbose') ?: $this->verbose;
 
-        $dryRun  = $request->getVar('dryrun') ? true : false;
+        $dryRun  = $request?->getVar('dryrun') ? true : false;
         if ($dryRun) {
             $this->dryRun = true;
         } else {
-            $forReal = $request->getVar('forreal') && (string) $request->getVar('forreal') !== 'false' && (string)$request->getVar('forreal') !== '0' && (string)$request->getVar('forreal') !== 'no';
+            $forReal = $request?->getVar('forreal') && (string) $request?->getVar('forreal') !== 'false' && (string)$request?->getVar('forreal') !== '0' && (string)$request?->getVar('forreal') !== 'no';
             if ($forReal) {
                 $this->dryRun = false;
             }
