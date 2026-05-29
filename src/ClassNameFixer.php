@@ -67,6 +67,12 @@ class ClassNameFixer extends BuildTask
         ],
     ];
 
+    public function setDryRun(bool $dryRun): self
+    {
+        $this->dryRun = $dryRun;
+        return $this;
+    }
+
     public function run($request)
     {
         $this->verbose = $request?->getVar('verbose') ?: $this->verbose;
