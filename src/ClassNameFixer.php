@@ -552,8 +552,21 @@ class ClassNameFixer extends BuildTask
             $tableStart = microtime(true);
             $columns = DB::query('SHOW COLUMNS FROM "' . $tableName . '"');
 
+            $scannedCols = 0;
+            $skippedCols = 0;
+
             foreach ($columns as $col) {
                 $fieldName = $col['Field'];
+
+                // Only string-like columns can hold a class name. Skipping
+                // numeric/date/blob columns avoids running a full-table
+                // "LIKE '%\%'" scan (leading wildcard = no index) on data that
+                // could never match, which is the main cost of this sweep.
+                if (!$this->isTextColumn($col['Type'] ?? '')) {
+                    $skippedCols++;
+                    continue;
+                }
+                $scannedCols++;
 
                 // Fetch distinct values containing a backslash
                 $rows = DB::query(
@@ -611,7 +624,10 @@ class ClassNameFixer extends BuildTask
             // Only surface fast tables when extra verbosity is requested, to keep
             // the scan output readable; slow ones always show and all are recorded.
             if ($this->verbose !== 'v' || $seconds >= 0.5) {
-                $this->flushNow('... scanned ' . $tableName . ' in ' . $this->formatDuration($seconds));
+                $this->flushNow(
+                    '... scanned ' . $tableName . ' in ' . $this->formatDuration($seconds)
+                    . ' (' . $scannedCols . ' text col(s), ' . $skippedCols . ' skipped)'
+                );
             }
         }
 
@@ -726,6 +742,33 @@ class ClassNameFixer extends BuildTask
         $mins = (int) floor($seconds / 60);
         $secs = (int) round($seconds - ($mins * 60));
         return $mins . 'm ' . $secs . 's';
+    }
+
+    /**
+     * Whether a column's SQL type can hold a class-name string.
+     *
+     * $columnType comes from SHOW COLUMNS, e.g. "varchar(255)", "text",
+     * "enum('a','b')", "int", "datetime(6)", "decimal(10,2)".
+     */
+    protected function isTextColumn(string $columnType): bool
+    {
+        $baseType = strtolower(trim($columnType));
+        $parenPos = strpos($baseType, '(');
+        if ($parenPos !== false) {
+            $baseType = substr($baseType, 0, $parenPos);
+        }
+        $baseType = trim($baseType);
+
+        return in_array($baseType, [
+            'char',
+            'varchar',
+            'tinytext',
+            'text',
+            'mediumtext',
+            'longtext',
+            'enum', // legacy ClassName columns were enums before being widened to varchar
+            'set',
+        ], true);
     }
 
     protected function reportSlowest(int $limit = 15): void
