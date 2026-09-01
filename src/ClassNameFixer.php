@@ -72,6 +72,14 @@ class ClassNameFixer extends BuildTask
 
     protected array $tableTimings = [];
 
+    /**
+     * old value => new value, for class renames confidently resolved during the
+     * ClassName pass (short-name / table matches only, never best-guess
+     * fallbacks). Re-applied to every "*Class*" column in the sweep so that
+     * legacy bare values like "Member" get the same mapping as ClassName did.
+     */
+    protected array $renameMap = [];
+
     private static $other_fields_to_check = [
         'DNADesign\\Elemental\\Models\\ElementalArea' => [
             'OwnerClassName',
@@ -363,6 +371,13 @@ class ClassNameFixer extends BuildTask
                 $resolved ? 'created' : 'deleted'
             );
 
+            // Only remember confident short-name/table matches (not best-guess
+            // fallbacks or NULL wipes) so the sweep can safely re-apply the exact
+            // same old→new mapping to other "*Class*" columns.
+            if (!$isEmpty && $resolved !== null && $reason === 'short-name match') {
+                $this->recordRename($originalValue, $resolved);
+            }
+
             if ($isEmpty) {
                 $this->applyUpdate(
                     'UPDATE "' . $tableName . '" SET "' . $fieldName . '" = ? WHERE "' . $fieldName . '" IS NULL OR "' . $fieldName . '" = \'\'',
@@ -542,8 +557,15 @@ class ClassNameFixer extends BuildTask
     {
         $this->flushNow('');
         $this->flushNowLine();
-        $this->flushNow('Scanning all tables for suspicious class-name-esque values');
+        $this->flushNow('Scanning "*Class*" columns for suspicious values and applying known renames');
         $this->flushNowLine();
+
+        $renameKeys = array_keys($this->renameMap);
+        if (count($renameKeys) > 0) {
+            $this->flushNow(
+                '... ' . count($renameKeys) . ' confident class rename(s) from this run will be applied to matching "*Class*" columns'
+            );
+        }
 
         $unresolved = [];
         $manualPotentials = []; // Track the broad matches here
@@ -552,34 +574,62 @@ class ClassNameFixer extends BuildTask
             $tableStart = microtime(true);
             $columns = DB::query('SHOW COLUMNS FROM "' . $tableName . '"');
 
-            $scannedCols = 0;
+            // Limit to text columns whose name contains "class" (case-insensitive):
+            // ClassName, RecordClassName, OwnerClassName, ParentClass, etc. These
+            // are the only columns that store class references, so this is where
+            // both the suspicious sweep and the known-rename map are relevant.
+            $classColumns = [];
             $skippedCols = 0;
-
             foreach ($columns as $col) {
                 $fieldName = $col['Field'];
-
-                // Only string-like columns can hold a class name. Skipping
-                // numeric/date/blob columns avoids running a full-table
-                // "LIKE '%\%'" scan (leading wildcard = no index) on data that
-                // could never match, which is the main cost of this sweep.
-                if (!$this->isTextColumn($col['Type'] ?? '')) {
+                if (!$this->isTextColumn($col['Type'] ?? '') || stripos($fieldName, 'class') === false) {
                     $skippedCols++;
                     continue;
                 }
-                $scannedCols++;
+                $classColumns[] = $fieldName;
+            }
 
-                // Fetch distinct values containing a backslash
-                $rows = DB::query(
-                    'SELECT "' . $fieldName . '" AS row_value
-                    FROM "' . $tableName . '"
-                    WHERE "' . $fieldName . '" LIKE \'%\\\\%\'
-                    GROUP BY "' . $fieldName . '"'
-                );
+            $renamesApplied = 0;
+
+            foreach ($classColumns as $fieldName) {
+                // One scan per class column, returning only the values we care
+                // about: those containing a backslash (suspicious) OR those equal
+                // to a known rename key (e.g. a bare legacy "Member"). Everything
+                // else is filtered out in SQL so the result stays tiny.
+                $rows = $this->classColumnCandidates($tableName, $fieldName, $renameKeys);
 
                 foreach ($rows as $row) {
                     $value = $row['row_value'] ?? '';
+                    $countForValue = (int) ($row['c'] ?? 0);
 
-                    if ($value === '' || class_exists($value)) {
+                    if ($value === '' || $value === null) {
+                        continue;
+                    }
+
+                    // (B) Apply a rename already decided during the ClassName pass.
+                    //     Handles bare legacy values with no backslash (e.g. Member).
+                    if (isset($this->renameMap[$value]) && $this->renameMap[$value] !== $value) {
+                        $new = $this->renameMap[$value];
+                        $this->flushNow(
+                            '... ' . $tableName . '.' . $fieldName . ': ' . $countForValue . ' row(s) '
+                            . $value . ' → ' . $new . ' (known rename)',
+                            'created'
+                        );
+                        $this->applyUpdate(
+                            'UPDATE "' . $tableName . '" SET "' . $fieldName . '" = ? WHERE "' . $fieldName . '" = ?',
+                            [$new, $value]
+                        );
+                        $renamesApplied++;
+                        continue;
+                    }
+
+                    // Already a valid class — leave it alone.
+                    if (class_exists($value)) {
+                        continue;
+                    }
+
+                    // (A) Suspicious detection only applies to backslash values.
+                    if (strpos($value, '\\') === false) {
                         continue;
                     }
 
@@ -597,6 +647,9 @@ class ClassNameFixer extends BuildTask
                                 'UPDATE "' . $tableName . '" SET "' . $fieldName . '" = ? WHERE "' . $fieldName . '" = ?',
                                 [$better, $value]
                             );
+                            // Record so later columns/tables get the same mapping.
+                            $this->recordRename($value, $better);
+                            $renameKeys = array_keys($this->renameMap);
                         } else {
                             $unresolved[] = [
                                 'Table' => $tableName,
@@ -619,14 +672,20 @@ class ClassNameFixer extends BuildTask
                 }
             }
 
+            if (count($classColumns) === 0) {
+                continue;
+            }
+
             $seconds = microtime(true) - $tableStart;
             $this->recordTiming($tableName, 'scan', $seconds);
             // Only surface fast tables when extra verbosity is requested, to keep
-            // the scan output readable; slow ones always show and all are recorded.
-            if ($this->verbose !== 'v' || $seconds >= 0.5) {
+            // the scan output readable; slow ones and any that got a rename fix
+            // always show, and all are recorded.
+            if ($this->verbose !== 'v' || $seconds >= 0.5 || $renamesApplied > 0) {
                 $this->flushNow(
                     '... scanned ' . $tableName . ' in ' . $this->formatDuration($seconds)
-                    . ' (' . $scannedCols . ' text col(s), ' . $skippedCols . ' skipped)'
+                    . ' (' . count($classColumns) . ' class col(s), '
+                    . $renamesApplied . ' known-rename fix(es))'
                 );
             }
         }
@@ -649,6 +708,33 @@ class ClassNameFixer extends BuildTask
                 $this->flushNow('... ... [MANUAL CHECK] ' . $m['Table'] . '.' . $m['Field'] . ' Value: ' . $m['Value']);
             }
         }
+    }
+
+    /**
+     * Fetch the candidate values worth inspecting in a single "*Class*" column:
+     * anything containing a backslash (suspicious FQCN-ish value) OR anything
+     * equal to a known rename key. Returns row_value + count, deduped in SQL.
+     *
+     * @param string[] $renameKeys
+     */
+    protected function classColumnCandidates(string $tableName, string $fieldName, array $renameKeys)
+    {
+        $where = '"' . $fieldName . '" LIKE \'%\\\\%\'';
+        $params = [];
+
+        if (count($renameKeys) > 0) {
+            $placeholders = implode(', ', array_fill(0, count($renameKeys), '?'));
+            $where .= ' OR "' . $fieldName . '" IN (' . $placeholders . ')';
+            $params = array_values($renameKeys);
+        }
+
+        return DB::prepared_query(
+            'SELECT "' . $fieldName . '" AS row_value, COUNT(*) AS c
+            FROM "' . $tableName . '"
+            WHERE ' . $where . '
+            GROUP BY "' . $fieldName . '"',
+            $params
+        );
     }
 
     // ----------------------------------------------------------------
@@ -769,6 +855,18 @@ class ClassNameFixer extends BuildTask
             'enum', // legacy ClassName columns were enums before being widened to varchar
             'set',
         ], true);
+    }
+
+    /**
+     * Remember a confident old => new class rename so it can be re-applied to
+     * other "*Class*" columns. Ignores empties and no-op (old === new) mappings.
+     */
+    protected function recordRename(?string $old, ?string $new): void
+    {
+        if ($old === null || $old === '' || $new === null || $new === '' || $old === $new) {
+            return;
+        }
+        $this->renameMap[$old] = $new;
     }
 
     protected function reportSlowest(int $limit = 15): void
