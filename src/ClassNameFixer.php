@@ -8,10 +8,15 @@ use SilverStripe\CMS\Model\SiteTreeLink;
 use SilverStripe\Core\ClassInfo;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Injector\Injector;
+use SilverStripe\Dev\BuildTask;
 use SilverStripe\ORM\DataObject;
 use SilverStripe\ORM\DataObjectSchema;
 use SilverStripe\ORM\DB;
-use SilverStripe\Dev\BuildTask;
+use SilverStripe\PolyExecution\PolyOutput;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Formatter\OutputFormatter;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputOption;
 
 /**
  * Scan every DataObject table for invalid ClassName (and similar) values and
@@ -23,40 +28,47 @@ use SilverStripe\Dev\BuildTask;
  * 3. If unresolved, fall back to bestClassName() for the table (ClassName only).
  * 4. Issue a single parameterized UPDATE query replacing the old value with the new one.
  *
- * Run modes:
- * - $dryRun = true  : compute and log every proposed fix, do not touch the DB.
- * - $dryRun = false : compute, log, and execute.
+ * Run modes (Silverstripe 6):
+ * - default          : DRY RUN — compute and log every proposed fix, do not touch the DB.
+ * - --for-real       : compute, log, and execute.
+ * - --dry-run        : force a dry run (takes precedence over --for-real).
+ * - --verbosity=vvv  : 'v' = basic logging, 'vv' = log every proposed fix, 'vvv' = log even more.
+ *
+ * Run it via:
+ *   sake tasks:check-class-names --for-real
+ *   /dev/tasks/check-class-names?for-real=1
  */
-
 class ClassNameFixer extends BuildTask
 {
-    protected $title = 'Check all tables for valid class names (Bulk Update)';
+    protected static string $commandName = 'check-class-names';
 
-    protected $description = 'Check all tables for valid class names and resolve errors via bulk value-to-value updates.';
+    protected string $title = 'Check all tables for valid class names (Bulk Update)';
 
-    private static $segment = 'check-class-names';
+    protected static string $description = 'Check all tables for valid class names and resolve errors via bulk value-to-value updates.';
 
-    protected $enabled = true;
+    private static bool $is_enabled = true;
 
-    protected $dryRun = true;
+    protected bool $dryRun = true;
 
-    protected $extendFieldSize = true;
+    protected bool $extendFieldSize = true;
 
-    protected $onlyRunFor = [];
+    protected array $onlyRunFor = [];
 
-    protected $listOfAllClasses = [];
+    protected array $listOfAllClasses = [];
 
-    protected $countsOfAllClasses = [];
+    protected array $countsOfAllClasses = [];
 
-    protected $dbTablesPresent = [];
+    protected array $dbTablesPresent = [];
 
     protected $dataObjectSchema;
 
-    protected $bestClassNameStore = [];
+    protected array $bestClassNameStore = [];
 
     protected $tableNameToClassMap;
 
-    protected $verbose = 'v'; // 'v' = basic logging, 'vv' = log every proposed fix, 'vvv' = log even more
+    protected string $verbose = 'v'; // 'v' = basic logging, 'vv' = log every proposed fix, 'vvv' = log even more
+
+    protected ?PolyOutput $output = null;
 
     private static $other_fields_to_check = [
         'DNADesign\\Elemental\\Models\\ElementalArea' => [
@@ -73,18 +85,46 @@ class ClassNameFixer extends BuildTask
         return $this;
     }
 
-    public function run($request)
+    public function getOptions(): array
     {
-        $this->verbose = $request?->getVar('verbose') ?: $this->verbose;
+        return [
+            new InputOption(
+                'for-real',
+                null,
+                InputOption::VALUE_NONE,
+                'Actually write changes to the database (default is a dry run).'
+            ),
+            new InputOption(
+                'dry-run',
+                null,
+                InputOption::VALUE_NONE,
+                'Force a dry run. Takes precedence over --for-real.'
+            ),
+            new InputOption(
+                'verbosity',
+                null,
+                InputOption::VALUE_REQUIRED,
+                "Logging level: 'v' (basic), 'vv' (every proposed fix) or 'vvv' (everything).",
+                'v'
+            ),
+        ];
+    }
 
-        $dryRun  = $request?->getVar('dryrun') ? true : false;
-        if ($dryRun) {
+    protected function execute(InputInterface $input, PolyOutput $output): int
+    {
+        $this->output = $output;
+
+        $verbosity = (string) $input->getOption('verbosity');
+        if ($verbosity !== '') {
+            $this->verbose = $verbosity;
+        }
+
+        // Default is a dry run. --for-real flips it; --dry-run always wins.
+        if ($input->getOption('for-real')) {
+            $this->dryRun = false;
+        }
+        if ($input->getOption('dry-run')) {
             $this->dryRun = true;
-        } else {
-            $forReal = $request?->getVar('forreal') && (string) $request?->getVar('forreal') !== 'false' && (string)$request?->getVar('forreal') !== '0' && (string)$request?->getVar('forreal') !== 'no';
-            if ($forReal) {
-                $this->dryRun = false;
-            }
         }
 
         $this->announceRunMode();
@@ -101,6 +141,8 @@ class ClassNameFixer extends BuildTask
             $this->processClass($objectClassName);
         }
         $this->findSuspiciousClassNames();
+
+        return Command::SUCCESS;
     }
 
     // ----------------------------------------------------------------
@@ -111,9 +153,9 @@ class ClassNameFixer extends BuildTask
     {
         $this->flushNowLine();
         if ($this->dryRun) {
-            $this->flushNow('DRY RUN — nothing will be written to the database.');
+            $this->flushNow('DRY RUN — nothing will be written to the database.', 'notice');
         } else {
-            $this->flushNow('REAL RUN — changes will be applied to the database.');
+            $this->flushNow('REAL RUN — changes will be applied to the database.', 'notice');
         }
         $this->flushNowLine();
     }
@@ -199,7 +241,7 @@ class ClassNameFixer extends BuildTask
     protected function fieldsToCheckFor(string $objectClassName): array
     {
         $fields = ['ClassName'];
-        $extra = $this->Config()->other_fields_to_check;
+        $extra = $this->config()->get('other_fields_to_check');
         if (isset($extra[$objectClassName])) {
             foreach ($extra[$objectClassName] as $f) {
                 $fields[] = $f;
@@ -452,10 +494,6 @@ class ClassNameFixer extends BuildTask
     //              Suspicious-value sweep over every column
     // ----------------------------------------------------------------
 
-    // ----------------------------------------------------------------
-    //              Suspicious-value sweep over every column
-    // ----------------------------------------------------------------
-
     protected function findSuspiciousClassNames()
     {
         $this->flushNow('');
@@ -574,13 +612,41 @@ class ClassNameFixer extends BuildTask
         }
     }
 
-    public function flushNow(string $message = '', ?string $type = '')
+    // ----------------------------------------------------------------
+    //                            Output
+    // ----------------------------------------------------------------
+
+    public function flushNow(string $message = '', ?string $type = ''): void
     {
-        DB::alteration_message($message, $type);
+        if (null === $this->output) {
+            return;
+        }
+
+        [$open, $close] = $this->styleTagsForType((string) $type);
+        // Escape dynamic content so values like "<empty/null>" or stray angle
+        // brackets aren't parsed as symfony/console style tags.
+        $this->output->writeln($open . OutputFormatter::escape($message) . $close);
     }
-    public function flushNowLine()
+
+    public function flushNowLine(): void
     {
         $this->flushNow('-------------------------------');
+    }
+
+    /**
+     * Map the legacy DB::alteration_message() message "types" onto
+     * symfony/console styling tags understood by PolyOutput.
+     *
+     * @return array{0:string,1:string} [openTag, closeTag]
+     */
+    protected function styleTagsForType(string $type): array
+    {
+        return match ($type) {
+            'error', 'deleted' => ['<fg=red>', '</>'],
+            'created', 'changed', 'repaired' => ['<fg=green>', '</>'],
+            'notice' => ['<comment>', '</comment>'],
+            default => ['', ''],
+        };
     }
 
     protected function tableExists(string $tableName): bool
