@@ -70,6 +70,8 @@ class ClassNameFixer extends BuildTask
 
     protected ?PolyOutput $output = null;
 
+    protected array $tableTimings = [];
+
     private static $other_fields_to_check = [
         'DNADesign\\Elemental\\Models\\ElementalArea' => [
             'OwnerClassName',
@@ -141,6 +143,7 @@ class ClassNameFixer extends BuildTask
             $this->processClass($objectClassName);
         }
         $this->findSuspiciousClassNames();
+        $this->reportSlowest();
 
         return Command::SUCCESS;
     }
@@ -185,6 +188,7 @@ class ClassNameFixer extends BuildTask
 
     protected function processClass(string $objectClassName)
     {
+        $start = microtime(true);
         $fields = $this->dataObjectSchema->databaseFields($objectClassName, false);
         if (count($fields) === 0) {
             if ($this->verbose === 'vvv') {
@@ -236,6 +240,10 @@ class ClassNameFixer extends BuildTask
             }
             $this->fixClassNames($tableName, $objectClassName, $fieldName);
         }
+
+        $seconds = microtime(true) - $start;
+        $this->recordTiming($tableName, 'check', $seconds);
+        $this->flushNow('... ' . $tableName . ' checked in ' . $this->formatDuration($seconds));
     }
 
     protected function fieldsToCheckFor(string $objectClassName): array
@@ -383,6 +391,41 @@ class ClassNameFixer extends BuildTask
             return null;
         }
 
+        // 1. Try to resolve the short name exactly as given.
+        $match = $this->matchShortName($shortName);
+        if ($match !== null) {
+            return $match;
+        }
+
+        // 2. Fallback: if the short name contains underscore(s) and nothing
+        //    matched, retry with every underscore removed. This handles legacy
+        //    "Some_Old_Class" style names whose modern equivalent is
+        //    "SomeOldClass" (works for any number of underscores).
+        if (str_contains($shortName, '_')) {
+            $stripped = str_replace('_', '', $shortName);
+            if ($stripped !== '' && $stripped !== $shortName) {
+                return $this->matchShortName($stripped);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Resolve a single short class name to exactly one fully-qualified class
+     * name, or null if there is no unambiguous match.
+     *
+     * Matching order:
+     *   (a) exact short-class-name match
+     *   (b) exact table-name match
+     *   (c) trailing "_ShortName" table-name suffix match
+     */
+    protected function matchShortName(string $shortName): ?string
+    {
+        if ($shortName === '') {
+            return null;
+        }
+
         // (a) match by short class name
         $byShort = [];
         foreach ($this->listOfAllClasses as $fqcn => $fqcnShort) {
@@ -403,6 +446,7 @@ class ClassNameFixer extends BuildTask
             return $tableMap[$shortName][0];
         }
 
+        // (c) match by trailing "_ShortName" table-name suffix
         $trailing = [];
         $suffix = '_' . $shortName;
         $suffixLen = strlen($suffix);
@@ -505,6 +549,7 @@ class ClassNameFixer extends BuildTask
         $manualPotentials = []; // Track the broad matches here
 
         foreach ($this->dbTablesPresent as $tableName) {
+            $tableStart = microtime(true);
             $columns = DB::query('SHOW COLUMNS FROM "' . $tableName . '"');
 
             foreach ($columns as $col) {
@@ -559,6 +604,14 @@ class ClassNameFixer extends BuildTask
                         }
                     }
                 }
+            }
+
+            $seconds = microtime(true) - $tableStart;
+            $this->recordTiming($tableName, 'scan', $seconds);
+            // Only surface fast tables when extra verbosity is requested, to keep
+            // the scan output readable; slow ones always show and all are recorded.
+            if ($this->verbose !== 'v' || $seconds >= 0.5) {
+                $this->flushNow('... scanned ' . $tableName . ' in ' . $this->formatDuration($seconds));
             }
         }
 
@@ -647,6 +700,56 @@ class ClassNameFixer extends BuildTask
             'notice' => ['<comment>', '</comment>'],
             default => ['', ''],
         };
+    }
+
+    // ----------------------------------------------------------------
+    //                            Timing
+    // ----------------------------------------------------------------
+
+    protected function recordTiming(string $name, string $phase, float $seconds): void
+    {
+        $this->tableTimings[] = [
+            'name' => $name,
+            'phase' => $phase,
+            'seconds' => $seconds,
+        ];
+    }
+
+    protected function formatDuration(float $seconds): string
+    {
+        if ($seconds < 1) {
+            return round($seconds * 1000) . 'ms';
+        }
+        if ($seconds < 60) {
+            return round($seconds, 2) . 's';
+        }
+        $mins = (int) floor($seconds / 60);
+        $secs = (int) round($seconds - ($mins * 60));
+        return $mins . 'm ' . $secs . 's';
+    }
+
+    protected function reportSlowest(int $limit = 15): void
+    {
+        if (count($this->tableTimings) === 0) {
+            return;
+        }
+
+        usort($this->tableTimings, fn ($a, $b) => $b['seconds'] <=> $a['seconds']);
+
+        $this->flushNow('');
+        $this->flushNowLine();
+        $this->flushNow('Slowest tables (top ' . $limit . ')');
+        $this->flushNowLine();
+
+        foreach (array_slice($this->tableTimings, 0, $limit) as $t) {
+            $this->flushNow(
+                '... ' . str_pad($this->formatDuration($t['seconds']), 8)
+                . ' [' . $t['phase'] . '] ' . $t['name']
+            );
+        }
+
+        $total = array_sum(array_column($this->tableTimings, 'seconds'));
+        $this->flushNow('... total measured: ' . $this->formatDuration($total));
     }
 
     protected function tableExists(string $tableName): bool
