@@ -95,16 +95,16 @@ class ClassNameFixer extends BuildTask
      */
     public function run($request)
     {
-        $verbosity = $request->getVar('verbosity');
+        $verbosity = $request?->getVar('verbosity');
         if ($verbosity !== null && $verbosity !== '') {
             $this->verbose = (string) $verbosity;
         }
 
         // Default is a dry run. for-real=1 flips it; dry-run=1 always wins.
-        if ($request->getVar('for-real')) {
+        if ($request?->getVar('for-real')) {
             $this->dryRun = false;
         }
-        if ($request->getVar('dry-run')) {
+        if ($request?->getVar('dry-run')) {
             $this->dryRun = true;
         }
 
