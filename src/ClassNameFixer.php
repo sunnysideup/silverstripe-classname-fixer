@@ -5,6 +5,7 @@ namespace Sunnysideup\ClassNameFixer;
 use Page;
 use SilverStripe\CMS\Model\SiteTree;
 use SilverStripe\CMS\Model\SiteTreeLink;
+use SilverStripe\Control\HTTPRequest;
 use SilverStripe\Core\ClassInfo;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Injector\Injector;
@@ -12,11 +13,6 @@ use SilverStripe\Dev\BuildTask;
 use SilverStripe\ORM\DataObject;
 use SilverStripe\ORM\DataObjectSchema;
 use SilverStripe\ORM\DB;
-use SilverStripe\PolyExecution\PolyOutput;
-use Symfony\Component\Console\Command\Command;
-use Symfony\Component\Console\Formatter\OutputFormatter;
-use Symfony\Component\Console\Input\InputInterface;
-use Symfony\Component\Console\Input\InputOption;
 
 /**
  * Scan every DataObject table for invalid ClassName (and similar) values and
@@ -28,25 +24,25 @@ use Symfony\Component\Console\Input\InputOption;
  * 3. If unresolved, fall back to bestClassName() for the table (ClassName only).
  * 4. Issue a single parameterized UPDATE query replacing the old value with the new one.
  *
- * Run modes (Silverstripe 6):
+ * Run modes:
  * - default          : DRY RUN — compute and log every proposed fix, do not touch the DB.
- * - --for-real       : compute, log, and execute.
- * - --dry-run        : force a dry run (takes precedence over --for-real).
- * - --verbosity=vvv  : 'v' = basic logging, 'vv' = log every proposed fix, 'vvv' = log even more.
+ * - for-real=1       : compute, log, and execute.
+ * - dry-run=1        : force a dry run (takes precedence over for-real).
+ * - verbosity=vvv    : 'v' = basic logging, 'vv' = log every proposed fix, 'vvv' = log even more.
  *
  * Run it via:
- *   sake tasks:check-class-names --for-real
+ *   sake dev/tasks/check-class-names for-real=1
  *   /dev/tasks/check-class-names?for-real=1
  */
 class ClassNameFixer extends BuildTask
 {
-    protected static string $commandName = 'check-class-names';
+    private static $segment = 'check-class-names';
 
-    protected string $title = 'Check all tables for valid class names (Bulk Update)';
+    protected $title = 'Check all tables for valid class names (Bulk Update)';
 
-    protected static string $description = 'Check all tables for valid class names and resolve errors via bulk value-to-value updates.';
+    protected $description = 'Check all tables for valid class names and resolve errors via bulk value-to-value updates.';
 
-    private static bool $is_enabled = true;
+    private static $is_enabled = true;
 
     protected bool $dryRun = true;
 
@@ -67,8 +63,6 @@ class ClassNameFixer extends BuildTask
     protected $tableNameToClassMap;
 
     protected string $verbose = 'v'; // 'v' = basic logging, 'vv' = log every proposed fix, 'vvv' = log even more
-
-    protected ?PolyOutput $output = null;
 
     protected array $tableTimings = [];
 
@@ -95,45 +89,22 @@ class ClassNameFixer extends BuildTask
         return $this;
     }
 
-    public function getOptions(): array
+    /**
+     * @param HTTPRequest $request
+     * @return void
+     */
+    public function run($request)
     {
-        return [
-            new InputOption(
-                'for-real',
-                null,
-                InputOption::VALUE_NONE,
-                'Actually write changes to the database (default is a dry run).'
-            ),
-            new InputOption(
-                'dry-run',
-                null,
-                InputOption::VALUE_NONE,
-                'Force a dry run. Takes precedence over --for-real.'
-            ),
-            new InputOption(
-                'verbosity',
-                null,
-                InputOption::VALUE_REQUIRED,
-                "Logging level: 'v' (basic), 'vv' (every proposed fix) or 'vvv' (everything).",
-                'v'
-            ),
-        ];
-    }
-
-    protected function execute(InputInterface $input, PolyOutput $output): int
-    {
-        $this->output = $output;
-
-        $verbosity = (string) $input->getOption('verbosity');
-        if ($verbosity !== '') {
-            $this->verbose = $verbosity;
+        $verbosity = $request->getVar('verbosity');
+        if ($verbosity !== null && $verbosity !== '') {
+            $this->verbose = (string) $verbosity;
         }
 
-        // Default is a dry run. --for-real flips it; --dry-run always wins.
-        if ($input->getOption('for-real')) {
+        // Default is a dry run. for-real=1 flips it; dry-run=1 always wins.
+        if ($request->getVar('for-real')) {
             $this->dryRun = false;
         }
-        if ($input->getOption('dry-run')) {
+        if ($request->getVar('dry-run')) {
             $this->dryRun = true;
         }
 
@@ -152,8 +123,6 @@ class ClassNameFixer extends BuildTask
         }
         $this->findSuspiciousClassNames();
         $this->reportSlowest();
-
-        return Command::SUCCESS;
     }
 
     // ----------------------------------------------------------------
@@ -773,35 +742,12 @@ class ClassNameFixer extends BuildTask
 
     public function flushNow(string $message = '', ?string $type = ''): void
     {
-        if (null === $this->output) {
-            return;
-        }
-
-        [$open, $close] = $this->styleTagsForType((string) $type);
-        // Escape dynamic content so values like "<empty/null>" or stray angle
-        // brackets aren't parsed as symfony/console style tags.
-        $this->output->writeln($open . OutputFormatter::escape($message) . $close);
+        DB::alteration_message($message, $type ?: null);
     }
 
     public function flushNowLine(): void
     {
         $this->flushNow('-------------------------------');
-    }
-
-    /**
-     * Map the legacy DB::alteration_message() message "types" onto
-     * symfony/console styling tags understood by PolyOutput.
-     *
-     * @return array{0:string,1:string} [openTag, closeTag]
-     */
-    protected function styleTagsForType(string $type): array
-    {
-        return match ($type) {
-            'error', 'deleted' => ['<fg=red>', '</>'],
-            'created', 'changed', 'repaired' => ['<fg=green>', '</>'],
-            'notice' => ['<comment>', '</comment>'],
-            default => ['', ''],
-        };
     }
 
     // ----------------------------------------------------------------
